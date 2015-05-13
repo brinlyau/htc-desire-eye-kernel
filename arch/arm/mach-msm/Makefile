@@ -307,10 +307,6 @@ ifdef CONFIG_BT
 endif #CONFIG_BT
 obj-$(CONFIG_ARCH_DUMMY) += board-htc-8x26.o htc_acoustic_alsa.o
 obj-$(CONFIG_ARCH_DUMMY) += board-8226-audio.o
-obj-$(CONFIG_MACH_MEM_UL) += board-mem-audio-amp.o
-obj-$(CONFIG_MACH_A5_UL) += board-afe-audio-amp.o
-obj-$(CONFIG_MACH_A5_DWG) += board-afe-audio-amp.o
-obj-$(CONFIG_MACH_A5_TL) += board-afe-audio-amp.o
 obj-$(CONFIG_ARCH_DUMMY) += board-8226.o board-8226-gpiomux.o
 obj-$(CONFIG_ARCH_DUMMY) += clock-local2.o clock-pll.o clock-8226.o clock-rpm.o clock-voter.o clock-mdss-8974.o
 obj-$(CONFIG_ARCH_DUMMY) += acpuclock-8226.o acpuclock-cortex.o
@@ -424,9 +420,7 @@ obj-$(CONFIG_MSM_VP_REGULATOR) += msm_vp.o
 obj-$(CONFIG_MSM_RPC_PMIC) += pmic.o
 obj-$(CONFIG_MSM_RPC_USB) += rpc_hsusb.o rpc_fsusb.o
 obj-$(CONFIG_MSM_RPC_PMAPP) += rpc_pmapp.o
-
 obj-$(CONFIG_MSM_ENABLE_WDOG_DEBUG_CONTROL) += wdog_debug.o
-
 obj-$(CONFIG_MSM_USE_USER_ACCESSIBLE_TIMERS) += timer_page.o
 
 ifdef CONFIG_MSM_CPR
@@ -453,26 +447,9 @@ obj-$(CONFIG_ARCH_MSM8974) += board-htc-8974.o htc_acoustic_alsa.o
 obj-$(CONFIG_ARCH_DUMMY) += htc_acoustic_alsa.o
 obj-$(CONFIG_MACH_BAGOSS) += board-bagoss-gpiomux.o
 obj-$(CONFIG_MACH_M8) += board-m8-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_M8_DUG) += board-m8-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_M8_TL) += board-m8-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_M8_WHL) += board-m8-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_M8_WL) += board-m8-gpiomux.o board-m8-audio.o
-
-obj-$(CONFIG_MACH_MEC_UL) += board-mec-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_MEC_DUG) += board-mec-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_MEC_DWG) += board-mec-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_MEC_TL) += board-mec-gpiomux.o board-m8-audio.o
-obj-$(CONFIG_MACH_MEC_WHL) += board-mec-gpiomux.o board-m8-audio.o
-
-
 obj-$(CONFIG_MACH_EYE_UL) += board-eye-gpiomux.o board-m8-audio.o
 obj-$(CONFIG_MACH_EYE_WL) += board-eye-gpiomux.o board-m8-audio.o
 obj-$(CONFIG_MACH_EYE_WHL) += board-eye-gpiomux.o board-m8-audio.o
-
-obj-$(CONFIG_MACH_MELS_TUHL) += board-mels-gpiomux.o board-m8-audio.o
-
-obj-$(CONFIG_MACH_MEM_UL) += board-mem-gpiomux.o
-obj-$(CONFIG_MACH_MEM_WL) += board-mem-gpiomux.o
 
 obj-$(CONFIG_HTC_HEADSET_PMIC) += htc_headset_pmic.o
 obj-$(CONFIG_HTC_HEADSET_GPIO) += htc_headset_gpio.o
