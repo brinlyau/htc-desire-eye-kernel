@@ -60,19 +60,19 @@ extern int get_partition_num_by_name(char *name);
 
 #if defined(CONFIG_MACH_EYE_UL)
 #define PN547_I2C_POWEROFF_SEQUENCE_FOR_EYE
-#elif defined(CONFIG_MACH_EYE_WHL)
+#elif defined(CONFIG_MACH_DUMMY)
 #define PN547_I2C_POWEROFF_SEQUENCE_FOR_EYE
-#elif defined(CONFIG_MACH_EYE_WL)
+#elif defined(CONFIG_MACH_DUMMY)
 #define PN547_I2C_POWEROFF_SEQUENCE_FOR_EYE
-#elif defined(CONFIG_MACH_MEC_TL)
-#define PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC
-#elif defined(CONFIG_MACH_MEC_WHL)
-#define PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC
-#elif defined(CONFIG_MACH_MEC_UL)
+#elif defined(CONFIG_MACH_DUMMY)
 #define PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC
 #elif defined(CONFIG_MACH_DUMMY)
 #define PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC
-#elif defined(CONFIG_MACH_MEC_DWG)
+#elif defined(CONFIG_MACH_DUMMY)
+#define PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC
+#elif defined(CONFIG_MACH_DUMMY)
+#define PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC
+#elif defined(CONFIG_MACH_DUMMY)
 #define PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC
 #elif defined(CONFIG_MACH_DUMMY)
 #define PN547_I2C_POWEROFF_SEQUENCE_FOR_B2
@@ -223,12 +223,7 @@ static void msm_flush_console(void)
 	unsigned long flags;
 
 	printk("\n");
-
-	if(board_rom_type())
-		printk(KERN_EMERG "[K] Restarting %s\n", linux_banner_stockui);
-	else
-		printk(KERN_EMERG "[K] Restarting %s\n", linux_banner);
-
+	printk(KERN_EMERG "[K] Restarting %s\n", linux_banner);
 	if (console_trylock()) {
 		console_unlock();
 		return;
@@ -383,40 +378,40 @@ static void __msm_power_off(int lower_pshold)
 #elif defined(PN547_I2C_POWEROFF_SEQUENCE_FOR_MEC)
 	gpio_tlmm_config(GPIO_CFG(SR_I2C_SCL, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_16MA), GPIO_CFG_ENABLE);
 	gpio_set_value(SR_I2C_SCL, 0);
- 	msleep(1);
+	msleep(1);
 
 	gpio_tlmm_config(GPIO_CFG(SR_I2C_SDA, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_16MA), GPIO_CFG_ENABLE);
 	gpio_set_value(SR_I2C_SDA, 0);
 	msleep(1);
-	
+
 	gpio_tlmm_config(GPIO_CFG(TP_RST, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_16MA), GPIO_CFG_ENABLE);
 	gpio_set_value(TP_RST, 0);
 	msleep(10);
-    
+
 	force_disable_PMICGPIO34();
 	msleep(10);
 
 	gpio_tlmm_config(GPIO_CFG(SRIO_1V8_EN, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_2MA), GPIO_CFG_ENABLE);
 	gpio_set_value(SRIO_1V8_EN, 0);
- 	msleep(100);
+	msleep(100);
 #elif defined(PN547_I2C_POWEROFF_SEQUENCE_FOR_B2)
 	gpio_tlmm_config(GPIO_CFG(SR_I2C_SCL, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_16MA), GPIO_CFG_ENABLE);
 	gpio_set_value(SR_I2C_SCL, 0);
- 	msleep(1);
-	
+	msleep(1);
+
 	gpio_tlmm_config(GPIO_CFG(SR_I2C_SDA, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_16MA), GPIO_CFG_ENABLE);
 	gpio_set_value(SR_I2C_SDA, 0);
 	msleep(20);
-	
+
 	gpio_tlmm_config(GPIO_CFG(TP_RST, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_16MA), GPIO_CFG_ENABLE);
 	gpio_set_value(TP_RST, 0);
 	msleep(10);
-    
+
 	force_disable_PMICGPIO34();
 	msleep(10);
 
 	force_disable_PMICLVS1();
- 	msleep(100);
+	msleep(100);
 #else
 #endif
 
@@ -587,7 +582,7 @@ void msm_restart(char mode, const char *cmd)
 		
 		msm_disable_wdog_debug();
 		halt_spmi_pmic_arbiter();
-#if defined(CONFIG_ARCH_DUMMY) && defined(CONFIG_HTC_DEBUG_WATCHDOG)
+#if defined(CONFIG_ARCH_MSM8226) && defined(CONFIG_HTC_DEBUG_WATCHDOG)
 		msm_watchdog_reset();
 #else
 		__raw_writel(0, MSM_MPM2_PSHOLD_BASE);

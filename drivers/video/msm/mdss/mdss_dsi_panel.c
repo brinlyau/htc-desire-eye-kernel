@@ -1193,6 +1193,8 @@ static int mdss_panel_parse_dt(struct device_node *np,
 	rc = of_property_read_u32(np, "htc,mdp-pcc-b", &tmp);
 	pinfo->pcc_b = (!rc ? tmp : 0);
 
+	pinfo->skip_frame = of_property_read_bool(np, "htc,skip-frame");
+
 	rc = of_property_read_u32(np, "htc,mdss-max-brt-level", &tmp);
 	pinfo->act_max_brt = (!rc ? tmp : MDSS_MAX_BL_BRIGHTNESS);
 	pinfo->max_brt = MDSS_MAX_BL_BRIGHTNESS;

@@ -108,24 +108,20 @@ char *board_mid(void)
 }
 EXPORT_SYMBOL(board_mid);
 
-static int android_rom_type;
-static int __init board_rom_type_setup(char *rom_type)
+static char android_HWver[64] = {0};
+static int __init board_HWver_setup(char *HWver)
 {
-	pr_info("%s: rom type %s\r\n", __func__, rom_type);
-	if (!strcmp(rom_type, "NORMAL"))
-		android_rom_type = 0;
-	else if (!strcmp(rom_type, "STOCKUI"))
-		android_rom_type = 1;
-
+	pr_info("%s: set HWver to %s\r\n", __func__, HWver);
+	strncpy(android_HWver, HWver, sizeof(android_HWver)/sizeof(android_HWver[0]) - 1);
 	return 1;
 }
-__setup("androidboot.rom_type=", board_rom_type_setup);
+__setup("androidboot.hwversion=", board_HWver_setup);
 
-int board_rom_type(void)
+char *board_HWver(void)
 {
-	return android_rom_type;
+	return android_HWver;
 }
-EXPORT_SYMBOL(board_rom_type);
+EXPORT_SYMBOL(board_HWver);
 
 static int mfg_mode;
 static int fullramdump_flag;

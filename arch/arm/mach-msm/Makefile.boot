@@ -139,6 +139,7 @@ endif
 	dtb-$(CONFIG_ARCH_MSM8226)	+= apq8026-v2-720p-mtp.dtb
 	dtb-$(CONFIG_ARCH_MSM8226)	+= apq8026-v2-1080p-mtp.dtb
 
+
 # FSM9XXX
    zreladdr-$(CONFIG_ARCH_FSM9XXX)	:= 0x10008000
 params_phys-$(CONFIG_ARCH_FSM9XXX)	:= 0x10000100
@@ -171,13 +172,6 @@ initrd_phys-$(CONFIG_ARCH_FSM9XXX)	:= 0x12000000
 	dtb-$(CONFIG_ARCH_MSMSAMARIUM)	+= msmsamarium-rumi.dtb
 
 # HTC dtbs
-ifeq ($(CONFIG_MACH_M8), y)
-	htc_dtb-$(CONFIG_ARCH_MSM8974)  += msm8974pro-ab-pm8941-m8.dtb
-	htc_dtb-$(CONFIG_ARCH_MSM8974)  += msm8974pro-ab-pm8941-m8-xb.dtb
-	htc_dtb-$(CONFIG_ARCH_MSM8974)  += msm8974pro-ab-pm8941-m8-xd.dtb
-	htc_dtb-$(CONFIG_ARCH_MSM8974)  += msm8974pro-ab-pm8941-m8-xe.dtb
-	htc_dtb-$(CONFIG_ARCH_MSM8974)  += msm8974pro-ab-pm8941-m8-xf.dtb
-endif
-ifeq ($(CONFIG_MACH_EYE_UL)$(CONFIG_MACH_EYE_WL)$(CONFIG_MACH_EYE_WHL), y)
+ifeq ($(CONFIG_MACH_EYE_UL), y)
 	htc_dtb-$(CONFIG_ARCH_MSM8974)  += msm8974pro-aa-pm8941-eyeul.dtb
 endif

@@ -25,6 +25,8 @@
 #include "kgsl_cffdump.h"
 #include "kgsl_device.h"
 
+DEFINE_MUTEX(kernel_map_global_lock);
+
 struct kgsl_mem_entry_attribute {
 	struct attribute attr;
 	int memtype;
@@ -364,7 +366,24 @@ static int kgsl_page_alloc_vmfault(struct kgsl_memdesc *memdesc,
 
 static int kgsl_page_alloc_vmflags(struct kgsl_memdesc *memdesc)
 {
-	return VM_RESERVED | VM_DONTEXPAND;
+	return VM_RESERVED | VM_DONTEXPAND | VM_DONTCOPY;
+}
+
+static void kgsl_page_alloc_unmap_kernel(struct kgsl_memdesc *memdesc)
+{
+	mutex_lock(&kernel_map_global_lock);
+	if (!memdesc->hostptr) {
+		BUG_ON(memdesc->hostptr_count);
+		goto done;
+	}
+	memdesc->hostptr_count--;
+	if (memdesc->hostptr_count)
+		goto done;
+	vunmap(memdesc->hostptr);
+	kgsl_driver.stats.vmalloc -= memdesc->size;
+	memdesc->hostptr = NULL;
+done:
+	mutex_unlock(&kernel_map_global_lock);
 }
 
 static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
@@ -376,10 +395,11 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 
 	kgsl_driver.stats.page_alloc -= memdesc->size;
 
-	if (memdesc->hostptr) {
-		vunmap(memdesc->hostptr);
-		kgsl_driver.stats.vmalloc -= memdesc->size;
-	}
+	kgsl_page_alloc_unmap_kernel(memdesc);
+
+	
+	BUG_ON(memdesc->hostptr);
+
 	if (memdesc->sg)
 		for_each_sg(memdesc->sg, sg, sglen, i) {
 			if (sg->length == 0)
@@ -422,11 +442,14 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 
 static int kgsl_contiguous_vmflags(struct kgsl_memdesc *memdesc)
 {
-	return VM_RESERVED | VM_IO | VM_PFNMAP | VM_DONTEXPAND;
+	return VM_RESERVED | VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTCOPY;
 }
 
 static int kgsl_page_alloc_map_kernel(struct kgsl_memdesc *memdesc)
 {
+	int ret = 0;
+
+	mutex_lock(&kernel_map_global_lock);
 	if (!memdesc->hostptr) {
 		pgprot_t page_prot = pgprot_writecombine(PAGE_KERNEL);
 		struct page **pages = NULL;
@@ -440,7 +463,8 @@ static int kgsl_page_alloc_map_kernel(struct kgsl_memdesc *memdesc)
 		if (!pages) {
 			KGSL_CORE_ERR("vmalloc(%d) failed\n",
 				npages * sizeof(struct page *));
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto done;
 		}
 
 		for_each_sg(memdesc->sg, sg, sglen, i) {
@@ -454,14 +478,19 @@ static int kgsl_page_alloc_map_kernel(struct kgsl_memdesc *memdesc)
 
 		memdesc->hostptr = vmap(pages, count,
 					VM_IOREMAP, page_prot);
-		KGSL_STATS_ADD(memdesc->size, kgsl_driver.stats.vmalloc,
+		if (memdesc->hostptr)
+			KGSL_STATS_ADD(memdesc->size, kgsl_driver.stats.vmalloc,
 				kgsl_driver.stats.vmalloc_max);
+		else
+			ret = -ENOMEM;
 		vfree(pages);
 	}
-	if (!memdesc->hostptr)
-		return -ENOMEM;
+	if (memdesc->hostptr)
+		memdesc->hostptr_count++;
+done:
+	mutex_unlock(&kernel_map_global_lock);
 
-	return 0;
+	return ret;
 }
 
 static int kgsl_contiguous_vmfault(struct kgsl_memdesc *memdesc,
@@ -485,28 +514,51 @@ static int kgsl_contiguous_vmfault(struct kgsl_memdesc *memdesc,
 	return VM_FAULT_NOPAGE;
 }
 
+static void kgsl_ebimem_unmap_kernel(struct kgsl_memdesc *memdesc)
+{
+	mutex_lock(&kernel_map_global_lock);
+	if (!memdesc->hostptr) {
+		BUG_ON(memdesc->hostptr_count);
+		goto done;
+	}
+	memdesc->hostptr_count--;
+	if (memdesc->hostptr_count)
+		goto done;
+
+	iounmap(memdesc->hostptr);
+	memdesc->hostptr = NULL;
+done:
+	mutex_unlock(&kernel_map_global_lock);
+}
+
 static void kgsl_ebimem_free(struct kgsl_memdesc *memdesc)
 
 {
 	kgsl_driver.stats.coherent -= memdesc->size;
-	if (memdesc->hostptr)
-		iounmap(memdesc->hostptr);
+	kgsl_ebimem_unmap_kernel(memdesc);
+	
+	BUG_ON(memdesc->hostptr);
 
 	free_contiguous_memory_by_paddr(memdesc->physaddr);
 }
 
 static int kgsl_ebimem_map_kernel(struct kgsl_memdesc *memdesc)
 {
+	int ret = 0;
+	mutex_lock(&kernel_map_global_lock);
 	if (!memdesc->hostptr) {
 		memdesc->hostptr = ioremap(memdesc->physaddr, memdesc->size);
 		if (!memdesc->hostptr) {
 			KGSL_CORE_ERR("ioremap failed, addr:0x%p, size:0x%x\n",
 				memdesc->hostptr, memdesc->size);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto done;
 		}
 	}
-
-	return 0;
+	memdesc->hostptr_count++;
+done:
+	mutex_unlock(&kernel_map_global_lock);
+	return ret;
 }
 
 static void kgsl_coherent_free(struct kgsl_memdesc *memdesc)
@@ -520,7 +572,8 @@ struct kgsl_memdesc_ops kgsl_page_alloc_ops = {
 	.free = kgsl_page_alloc_free,
 	.vmflags = kgsl_page_alloc_vmflags,
 	.vmfault = kgsl_page_alloc_vmfault,
-	.map_kernel_mem = kgsl_page_alloc_map_kernel,
+	.map_kernel = kgsl_page_alloc_map_kernel,
+	.unmap_kernel = kgsl_page_alloc_unmap_kernel,
 };
 EXPORT_SYMBOL(kgsl_page_alloc_ops);
 
@@ -528,7 +581,8 @@ static struct kgsl_memdesc_ops kgsl_ebimem_ops = {
 	.free = kgsl_ebimem_free,
 	.vmflags = kgsl_contiguous_vmflags,
 	.vmfault = kgsl_contiguous_vmfault,
-	.map_kernel_mem = kgsl_ebimem_map_kernel,
+	.map_kernel = kgsl_ebimem_map_kernel,
+	.unmap_kernel = kgsl_ebimem_unmap_kernel,
 };
 
 static struct kgsl_memdesc_ops kgsl_coherent_ops = {
@@ -577,8 +631,8 @@ _kgsl_sharedmem_page_alloc(struct kgsl_memdesc *memdesc,
 
 	page_size = (align >= ilog2(SZ_64K) && size >= SZ_64K)
 			? SZ_64K : PAGE_SIZE;
-	
-	if (page_size != PAGE_SIZE)
+
+	if (ilog2(align) < page_size)
 		kgsl_memdesc_set_align(memdesc, ilog2(page_size));
 
 
@@ -865,12 +919,12 @@ kgsl_sharedmem_ebimem(struct kgsl_memdesc *memdesc,
 	if (result)
 		return result;
 
-	memdesc->hostptr = ioremap(memdesc->physaddr, size);
+	result = kgsl_ebimem_map_kernel(memdesc);
 
-	if (memdesc->hostptr == NULL) {
-		KGSL_CORE_ERR("ioremap failed\n");
+	if (result) {
+		KGSL_CORE_ERR("hostptr mapping failed\n");
 		kgsl_sharedmem_free(memdesc);
-		return -ENOMEM;
+		return result;
 	}
 
 	return 0;

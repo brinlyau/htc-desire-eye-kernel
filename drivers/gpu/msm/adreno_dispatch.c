@@ -21,6 +21,7 @@
 #include "adreno.h"
 #include "adreno_ringbuffer.h"
 #include "adreno_trace.h"
+#include "kgsl_sharedmem.h"
 #include "kgsl_htc.h"
 
 #define CMDQUEUE_NEXT(_i, _s) (((_i) + 1) % (_s))
@@ -30,6 +31,9 @@ static unsigned int _context_cmdqueue_size = 50;
 static unsigned int _context_queue_wait = 10000;
 
 static unsigned int _context_cmdbatch_burst = 5;
+
+static unsigned int _fault_throttle_time = 3000;
+static unsigned int _fault_throttle_burst = 3;
 
 static unsigned int _dispatcher_inflight = 15;
 
@@ -112,12 +116,26 @@ static inline struct kgsl_cmdbatch *adreno_dispatcher_get_cmdbatch(
 		struct adreno_context *drawctxt)
 {
 	struct kgsl_cmdbatch *cmdbatch = NULL;
+	int pending;
 
-	mutex_lock(&drawctxt->mutex);
+	spin_lock(&drawctxt->lock);
 	if (drawctxt->cmdqueue_head != drawctxt->cmdqueue_tail) {
 		cmdbatch = drawctxt->cmdqueue[drawctxt->cmdqueue_head];
 
-		if (kgsl_cmdbatch_sync_pending(cmdbatch)) {
+
+		spin_lock(&cmdbatch->lock);
+		pending = list_empty(&cmdbatch->synclist) ? 0 : 1;
+
+		if (pending) {
+			if (!timer_pending(&cmdbatch->timer))
+				mod_timer(&cmdbatch->timer, jiffies + (5 * HZ));
+			spin_unlock(&cmdbatch->lock);
+		} else {
+			spin_unlock(&cmdbatch->lock);
+			del_timer_sync(&cmdbatch->timer);
+		}
+
+		if (pending) {
 			cmdbatch = ERR_PTR(-EAGAIN);
 			goto done;
 		}
@@ -129,7 +147,7 @@ static inline struct kgsl_cmdbatch *adreno_dispatcher_get_cmdbatch(
 	}
 
 done:
-	mutex_unlock(&drawctxt->mutex);
+	spin_unlock(&drawctxt->lock);
 
 	return cmdbatch;
 }
@@ -138,13 +156,17 @@ static inline int adreno_dispatcher_requeue_cmdbatch(
 		struct adreno_context *drawctxt, struct kgsl_cmdbatch *cmdbatch)
 {
 	unsigned int prev;
-	mutex_lock(&drawctxt->mutex);
+	struct kgsl_device *device;
+	spin_lock(&drawctxt->lock);
 
 	if (kgsl_context_detached(&drawctxt->base) ||
 		drawctxt->state == ADRENO_CONTEXT_STATE_INVALID) {
-		mutex_unlock(&drawctxt->mutex);
+		spin_unlock(&drawctxt->lock);
+		device = cmdbatch->device;
 		
+		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 		kgsl_cmdbatch_destroy(cmdbatch);
+		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 		return -EINVAL;
 	}
 
@@ -160,7 +182,7 @@ static inline int adreno_dispatcher_requeue_cmdbatch(
 
 	
 	drawctxt->cmdqueue_head = prev;
-	mutex_unlock(&drawctxt->mutex);
+	spin_unlock(&drawctxt->lock);
 	return 0;
 }
 
@@ -258,6 +280,7 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
 	int count = 0;
 	int requeued = 0;
+	unsigned int timestamp;
 
 	while ((count < _context_cmdbatch_burst) &&
 		(dispatcher->inflight < _dispatcher_inflight)) {
@@ -278,9 +301,14 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 
 
 		if (cmdbatch->flags & KGSL_CONTEXT_SYNC) {
+			struct kgsl_device *device = cmdbatch->device;
+			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 			kgsl_cmdbatch_destroy(cmdbatch);
+			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 			continue;
 		}
+
+		timestamp = cmdbatch->timestamp;
 
 		ret = sendcmd(adreno_dev, cmdbatch);
 
@@ -289,6 +317,8 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 				cmdbatch) ? 0 : 1;
 			break;
 		}
+
+		drawctxt->submitted_timestamp = timestamp;
 
 		count++;
 	}
@@ -390,7 +420,7 @@ static int _check_context_queue(struct adreno_context *drawctxt)
 {
 	int ret;
 
-	mutex_lock(&drawctxt->mutex);
+	spin_lock(&drawctxt->lock);
 
 
 	if (drawctxt->state == ADRENO_CONTEXT_STATE_INVALID)
@@ -398,7 +428,7 @@ static int _check_context_queue(struct adreno_context *drawctxt)
 	else
 		ret = drawctxt->queued < _context_cmdqueue_size ? 1 : 0;
 
-	mutex_unlock(&drawctxt->mutex);
+	spin_unlock(&drawctxt->lock);
 
 	return ret;
 }
@@ -430,10 +460,10 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 {
 	int ret;
 
-	mutex_lock(&drawctxt->mutex);
+	spin_lock(&drawctxt->lock);
 
 	if (kgsl_context_detached(&drawctxt->base)) {
-		mutex_unlock(&drawctxt->mutex);
+		spin_unlock(&drawctxt->lock);
 		return -EINVAL;
 	}
 
@@ -457,37 +487,41 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 
 	while (drawctxt->queued >= _context_cmdqueue_size) {
 		trace_adreno_drawctxt_sleep(drawctxt);
-		mutex_unlock(&drawctxt->mutex);
+		spin_unlock(&drawctxt->lock);
 
 		ret = wait_event_interruptible_timeout(drawctxt->wq,
 			_check_context_queue(drawctxt),
 			msecs_to_jiffies(_context_queue_wait));
 
-		mutex_lock(&drawctxt->mutex);
+		spin_lock(&drawctxt->lock);
 		trace_adreno_drawctxt_wake(drawctxt);
 
 		if (ret <= 0) {
-			mutex_unlock(&drawctxt->mutex);
+			spin_unlock(&drawctxt->lock);
 			return (ret == 0) ? -ETIMEDOUT : (int) ret;
 		}
 	}
 
 	if (drawctxt->state == ADRENO_CONTEXT_STATE_INVALID) {
-		mutex_unlock(&drawctxt->mutex);
+		spin_unlock(&drawctxt->lock);
 		return -EDEADLK;
 	}
 	if (kgsl_context_detached(&drawctxt->base)) {
-		mutex_unlock(&drawctxt->mutex);
+		spin_unlock(&drawctxt->lock);
 		return -EINVAL;
 	}
 
 	ret = get_timestamp(drawctxt, cmdbatch, timestamp);
 	if (ret) {
-		mutex_unlock(&drawctxt->mutex);
+		spin_unlock(&drawctxt->lock);
 		return ret;
 	}
 
 	cmdbatch->timestamp = *timestamp;
+
+	
+	if (!(cmdbatch->flags & KGSL_CONTEXT_SYNC))
+		drawctxt->queued_timestamp = *timestamp;
 
 
 	if (drawctxt->base.flags & KGSL_CONTEXT_NO_FAULT_TOLERANCE)
@@ -504,7 +538,7 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 	trace_adreno_cmdbatch_queued(cmdbatch, drawctxt->queued);
 
 
-	mutex_unlock(&drawctxt->mutex);
+	spin_unlock(&drawctxt->lock);
 
 	
 	dispatcher_queue_context(adreno_dev, drawctxt);
@@ -542,7 +576,8 @@ static void mark_guilty_context(struct kgsl_device *device, unsigned int id)
 	read_unlock(&device->context_lock);
 }
 
-static void cmdbatch_skip_ib(struct kgsl_cmdbatch *cmdbatch, unsigned int base)
+static void cmdbatch_skip_ib(struct kgsl_cmdbatch *cmdbatch,
+				unsigned int base)
 {
 	int i;
 
@@ -553,6 +588,31 @@ static void cmdbatch_skip_ib(struct kgsl_cmdbatch *cmdbatch, unsigned int base)
 				return;
 		}
 	}
+}
+
+static void cmdbatch_skip_cmd(struct kgsl_cmdbatch *cmdbatch,
+	struct kgsl_cmdbatch **replay, int count)
+{
+	struct adreno_context *drawctxt = ADRENO_CONTEXT(cmdbatch->context);
+	int i;
+
+	for (i = 1; i < count; i++) {
+		if (replay[i]->context->id == cmdbatch->context->id) {
+			replay[i]->fault_policy = replay[0]->fault_policy;
+			set_bit(CMDBATCH_FLAG_FORCE_PREAMBLE, &replay[i]->priv);
+			set_bit(KGSL_FT_SKIPCMD, &replay[i]->fault_recovery);
+			break;
+		}
+	}
+
+	if ((i == count) && drawctxt) {
+		set_bit(ADRENO_CONTEXT_SKIP_CMD, &drawctxt->priv);
+		drawctxt->fault_policy = replay[0]->fault_policy;
+	}
+
+	
+	set_bit(CMDBATCH_FLAG_SKIP, &cmdbatch->priv);
+	cmdbatch->fault_recovery = 0;
 }
 
 static void cmdbatch_skip_frame(struct kgsl_cmdbatch *cmdbatch,
@@ -607,11 +667,8 @@ static void remove_invalidated_cmdbatches(struct kgsl_device *device,
 			drawctxt->state == ADRENO_CONTEXT_STATE_INVALID) {
 			replay[i] = NULL;
 
-			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 			kgsl_cancel_events_timestamp(device, cmd->context,
 				cmd->timestamp);
-			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
-
 			kgsl_cmdbatch_destroy(cmd);
 		}
 	}
@@ -680,6 +737,18 @@ static void adreno_fault_header(struct kgsl_device *device,
 		rptr, wptr, ib1base, ib1sz, ib2base, ib2sz);
 }
 
+void adreno_fault_skipcmd_detached(struct kgsl_device *device,
+				 struct adreno_context *drawctxt,
+				 struct kgsl_cmdbatch *cmdbatch)
+{
+	if (test_bit(ADRENO_CONTEXT_SKIP_CMD, &drawctxt->priv) &&
+			kgsl_context_detached(&drawctxt->base)) {
+		pr_fault(device, cmdbatch, "gpu %s ctx %d\n",
+			 "detached", cmdbatch->context->id);
+		clear_bit(ADRENO_CONTEXT_SKIP_CMD, &drawctxt->priv);
+	}
+}
+
 static int dispatcher_do_fault(struct kgsl_device *device)
 {
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
@@ -690,7 +759,6 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 	struct kgsl_cmdbatch *cmdbatch;
 	int ret, i, count = 0;
 	int keepfault, fault, first = 0;
-	bool pagefault = false;
 	int fault_pid = 0;
 
 	fault = atomic_xchg(&dispatcher->fault, 0);
@@ -722,9 +790,6 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 		adreno_readreg(adreno_dev, ADRENO_REG_CP_ME_CNTL, &reg);
 		reg |= (1 << 27) | (1 << 28);
 		adreno_writereg(adreno_dev, ADRENO_REG_CP_ME_CNTL, reg);
-
-		
-		set_bit(KGSL_FT_SKIP_PMDUMP, &cmdbatch->fault_policy);
 	}
 
 	adreno_readreg(adreno_dev, ADRENO_REG_CP_IB1_BASE, &base);
@@ -739,7 +804,8 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 		kgsl_device_snapshot(device, 1);
 	}
 
-	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+    kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+
 
 	
 	replay = kzalloc(sizeof(*replay) * dispatcher->inflight, GFP_KERNEL);
@@ -747,6 +813,7 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 	if (replay == NULL) {
 		unsigned int ptr = dispatcher->head;
 
+		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 		
 		mark_guilty_context(device, 0);
 
@@ -762,6 +829,7 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 
 
 		count = 0;
+		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 		goto replay;
 	}
 
@@ -776,6 +844,25 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 
 	cmdbatch = replay[0];
 
+	if (test_bit(KGSL_FT_THROTTLE, &cmdbatch->fault_policy)) {
+		if (time_after(jiffies, (cmdbatch->context->fault_time
+				+ msecs_to_jiffies(_fault_throttle_time)))) {
+			cmdbatch->context->fault_time = jiffies;
+			cmdbatch->context->fault_count = 1;
+		} else {
+			cmdbatch->context->fault_count++;
+			if (cmdbatch->context->fault_count >
+					_fault_throttle_burst) {
+				set_bit(KGSL_FT_DISABLE,
+						&cmdbatch->fault_policy);
+				pr_fault(device, cmdbatch,
+					 "gpu fault threshold exceeded %d faults in %d msecs\n",
+					 _fault_throttle_burst,
+					 _fault_throttle_time);
+			}
+		}
+	}
+
 
 	if (test_bit(KGSL_FT_DISABLE, &cmdbatch->fault_policy) ||
 		test_bit(KGSL_FT_TEMP_DISABLE, &cmdbatch->fault_policy)) {
@@ -783,7 +870,9 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 			cmdbatch->context->id, cmdbatch->timestamp);
 
 		mark_guilty_context(device, cmdbatch->context->id);
+		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 		adreno_drawctxt_invalidate(device, cmdbatch->context);
+		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 	}
 
 
@@ -800,7 +889,6 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 
 	if (test_bit(KGSL_CONTEXT_PAGEFAULT, &cmdbatch->context->priv)) {
 		
-		pagefault = true;
 		clear_bit(KGSL_FT_REPLAY, &cmdbatch->fault_policy);
 		clear_bit(KGSL_CONTEXT_PAGEFAULT, &cmdbatch->context->priv);
 	}
@@ -827,6 +915,16 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 		goto replay;
 	}
 
+	
+	if (test_and_clear_bit(KGSL_FT_SKIPCMD, &cmdbatch->fault_policy)) {
+		trace_adreno_cmdbatch_recovery(cmdbatch, BIT(KGSL_FT_SKIPCMD));
+
+		
+		cmdbatch_skip_cmd(cmdbatch, replay, count);
+
+		goto replay;
+	}
+
 	if (test_and_clear_bit(KGSL_FT_SKIPFRAME, &cmdbatch->fault_policy)) {
 		trace_adreno_cmdbatch_recovery(cmdbatch,
 			BIT(KGSL_FT_SKIPFRAME));
@@ -845,7 +943,9 @@ static int dispatcher_do_fault(struct kgsl_device *device)
 	mark_guilty_context(device, cmdbatch->context->id);
 
 	
+	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 	adreno_drawctxt_invalidate(device, cmdbatch->context);
+	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 
 
 replay:
@@ -864,8 +964,10 @@ replay:
 	
 	BUG_ON(ret);
 
+	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 	
 	remove_invalidated_cmdbatches(device, replay, count);
+	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 
 	
 	for (i = 0; i < count; i++) {
@@ -895,9 +997,11 @@ replay:
 			
 			mark_guilty_context(device, replay[i]->context->id);
 
+			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 			adreno_drawctxt_invalidate(device, replay[i]->context);
 			remove_invalidated_cmdbatches(device, &replay[i],
 				count - i);
+			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 		}
 	}
 
@@ -990,8 +1094,10 @@ static void adreno_dispatcher_work(struct work_struct *work)
 			dispatcher->head = CMDQUEUE_NEXT(dispatcher->head,
 				ADRENO_DISPATCH_CMDQUEUE_SIZE);
 
+			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 			
 			kgsl_cmdbatch_destroy(cmdbatch);
+			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 
 			
 
@@ -1159,16 +1265,19 @@ void adreno_dispatcher_stop(struct adreno_device *adreno_dev)
 void adreno_dispatcher_close(struct adreno_device *adreno_dev)
 {
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
+	struct kgsl_device *device = &adreno_dev->dev;
 
 	mutex_lock(&dispatcher->mutex);
 	del_timer_sync(&dispatcher->timer);
 	del_timer_sync(&dispatcher->fault_timer);
 
+	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 	while (dispatcher->head != dispatcher->tail) {
 		kgsl_cmdbatch_destroy(dispatcher->cmdqueue[dispatcher->head]);
 		dispatcher->head = (dispatcher->head + 1)
 			% ADRENO_DISPATCH_CMDQUEUE_SIZE;
 	}
+	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 
 	mutex_unlock(&dispatcher->mutex);
 
@@ -1234,6 +1343,10 @@ static DISPATCHER_UINT_ATTR(cmdbatch_timeout, 0644, 0, _cmdbatch_timeout);
 static DISPATCHER_UINT_ATTR(context_queue_wait, 0644, 0, _context_queue_wait);
 static DISPATCHER_UINT_ATTR(fault_detect_interval, 0644, 0,
 	_fault_timer_interval);
+static DISPATCHER_UINT_ATTR(fault_throttle_time, 0644, 0,
+	_fault_throttle_time);
+static DISPATCHER_UINT_ATTR(fault_throttle_burst, 0644, 0,
+	_fault_throttle_burst);
 
 static struct attribute *dispatcher_attrs[] = {
 	&dispatcher_attr_inflight.attr,
@@ -1242,6 +1355,8 @@ static struct attribute *dispatcher_attrs[] = {
 	&dispatcher_attr_cmdbatch_timeout.attr,
 	&dispatcher_attr_context_queue_wait.attr,
 	&dispatcher_attr_fault_detect_interval.attr,
+	&dispatcher_attr_fault_throttle_time.attr,
+	&dispatcher_attr_fault_throttle_burst.attr,
 	NULL,
 };
 
